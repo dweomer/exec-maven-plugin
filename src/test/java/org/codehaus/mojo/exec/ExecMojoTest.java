@@ -1,8 +1,5 @@
 package org.codehaus.mojo.exec;
 
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-
 /*
  * Copyright 2005 The Codehaus. Licensed under the Apache License, Version 2.0 (the "License"); you may not use this
  * file except in compliance with the License. You may obtain a copy of the License at
@@ -12,12 +9,17 @@ import static org.mockito.Mockito.when;
  * License.
  */
 
+import javax.inject.Inject;
+
 import java.io.File;
-import java.io.IOException;
 import java.io.OutputStream;
-import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -26,101 +28,122 @@ import java.util.UUID;
 import org.apache.commons.exec.CommandLine;
 import org.apache.commons.exec.ExecuteException;
 import org.apache.commons.exec.Executor;
-import org.apache.commons.exec.OS;
+import org.apache.maven.api.di.Provides;
+import org.apache.maven.api.plugin.testing.InjectMojo;
+import org.apache.maven.api.plugin.testing.MojoTest;
 import org.apache.maven.execution.MavenSession;
-import org.apache.maven.monitor.logging.DefaultLog;
 import org.apache.maven.plugin.MojoExecutionException;
-import org.apache.maven.plugin.logging.SystemStreamLog;
-import org.apache.maven.plugin.testing.AbstractMojoTestCase;
-import org.apache.maven.project.MavenProject;
-import org.apache.maven.project.ProjectBuilder;
-import org.apache.maven.project.ProjectBuildingRequest;
-import org.apache.maven.repository.internal.MavenRepositorySystemSession;
-import org.codehaus.plexus.logging.Logger;
-import org.codehaus.plexus.logging.console.ConsoleLogger;
-import org.codehaus.plexus.util.StringOutputStream;
+import org.apache.maven.toolchain.ToolchainManager;
+import org.eclipse.aether.RepositorySystem;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
-import org.sonatype.aether.impl.internal.SimpleLocalRepositoryManager;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import static java.util.Collections.emptyMap;
+import static org.apache.maven.api.plugin.testing.MojoExtension.setVariableValueToObject;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.when;
 
 /**
  * @author Jerome Lacoste
  * @version $Id$
  */
-public class ExecMojoTest
-    extends AbstractMojoTestCase
-{
-    @Mock
+@ExtendWith(MockitoExtension.class)
+@MojoTest
+class ExecMojoTest {
+
+    @Inject
     private MavenSession session;
-    
-    private static final File LOCAL_REPO = new File( "src/test/repository" );
-    
+
+    @Mock
+    private ToolchainManager toolchainManager;
+
+    @Provides
+    private ToolchainManager getToolchainManager() {
+        return toolchainManager;
+    }
+
+    @Mock
+    private RepositorySystem repositorySystem;
+
+    @Provides
+    private RepositorySystem getRepositorySystem() {
+        return repositorySystem;
+    }
+
+    private static final File LOCAL_REPO = new File("src/test/repository");
+
     /*
      * Finding a file actually on disk of the test system makes some of the tests fail.
-     * Hence a purely random UUID is used to prevent this situation. 
+     * Hence a purely random UUID is used to prevent this situation.
      */
     private static final String SOME_EXECUTABLE = UUID.randomUUID().toString();
 
     private MockExecMojo mojo;
 
-    static class MockExecMojo
-        extends ExecMojo
-    {
+    static class MockExecMojo extends ExecMojo {
         public int executeResult;
 
-        public List<CommandLine> commandLines = new ArrayList<CommandLine>();
+        public List<CommandLine> commandLines = new ArrayList<>();
 
         public String failureMsg;
 
-        public Map<String, String> systemProperties = new HashMap<String, String>();
+        public Map<String, String> systemProperties = new HashMap<>();
 
-        protected int executeCommandLine( Executor exec, CommandLine commandLine, Map enviro, OutputStream out,
-                                          OutputStream err )
-                                              throws IOException, ExecuteException
-        {
-            commandLines.add( commandLine );
-            if ( failureMsg != null )
-            {
-                throw new ExecuteException( failureMsg, executeResult );
+        protected MockExecMojo(RepositorySystem repositorySystem, ToolchainManager toolchainManager) {
+            super(repositorySystem, toolchainManager);
+        }
+
+        protected int executeCommandLine(
+                Executor exec, CommandLine commandLine, Map enviro, OutputStream out, OutputStream err)
+                throws ExecuteException {
+            commandLines.add(commandLine);
+            if (failureMsg != null) {
+                throw new ExecuteException(failureMsg, executeResult);
             }
             return executeResult;
         }
 
-        protected String getSystemProperty( String key )
-        {
-            return systemProperties.get( key );
+        protected String getSystemProperty(String key) {
+            return systemProperties.get(key);
         }
 
-        int getAmountExecutedCommandLines()
-        {
+        int getAmountExecutedCommandLines() {
             return commandLines.size();
         }
 
-        CommandLine getExecutedCommandline( int index )
-        {
-            return commandLines.get( index );
+        CommandLine getExecutedCommandline(int index) {
+            return commandLines.get(index);
         }
     }
 
-    public void setUp()
-        throws Exception
-    {
-        super.setUp();
-        mojo = new MockExecMojo();
+    @BeforeEach
+    void setUp() throws Exception {
+        mojo = new MockExecMojo(repositorySystem, toolchainManager);
         // note: most of the tests below assume that the specified
         // executable path is not fully specicied. See ExecMojo#getExecutablePath
-        mojo.setExecutable( SOME_EXECUTABLE );
-        mojo.setArguments( Arrays.asList( new String[] { "--version" } ) );
+        mojo.setExecutable(SOME_EXECUTABLE);
+        mojo.setArguments(Collections.singletonList("--version"));
         mojo.executeResult = 0;
-        mojo.setBasedir( File.createTempFile( "mvn-temp", "txt" ).getParentFile() );
+        mojo.setBasedir(Files.createTempFile("mvn-temp", "txt").getParent().toFile());
     }
 
-    public void testRunOK()
-        throws MojoExecutionException
-    {
+    @Test
+    void runOK() throws Exception {
         mojo.execute();
 
-        checkMojo( SOME_EXECUTABLE + " --version" );
+        checkMojo(SOME_EXECUTABLE + " --version");
     }
 
     /*
@@ -131,356 +154,344 @@ public class ExecMojoTest
      * output ); }
      */
 
-    /**
+    /*
      * integration test... - compile the Test class using mvn clean compile - run the test file using java, use it to
      * generate a file whose contains are compared to expected output
      */
 
-    // public void testRunOKWithAutoComputedClasspath()
-    // throws MojoExecutionException, Exception
-    // {
-    // String projectName = "project1";
-    //
-    // ExecMojo mojo = new ExecMojo();
-    //
-    // setUpProject( projectName, mojo );
-    //
-    // // compile project
-    // mojo.setExecutable( SOME_EXECUTABLE );
-    // mojo.setWorkingDirectory( new File( "src/test/projects/" + projectName + "/" ) );
-    // mojo.setArguments( Arrays.asList( new String[]{"clean", "compile"} ) );
-    //
-    // mojo.execute();
-    //
-    // mojo.getLog().info( "executed mvn clean compile" );
-    //
-    // // the command executes the test class
-    // mojo.setExecutable( "java" );
-    // mojo.setWorkingDirectory( (File) null );
-    // Classpath classpath = new Classpath();
-    // mojo.setArguments( Arrays.asList( new Object[]{"-Dproject.env1=value1", "-classpath", classpath,
-    // "org.codehaus.mojo.exec.test.Test",
-    // new File( "src/test/projects/" + projectName + "/target/exec/output.txt" ).getAbsolutePath(), "arg1",
-    // "arg2"} ) );
-    //
-    // mojo.execute();
-    //
-    // // checking the command line would involve resolving the repository
-    // // checkMojo( "java -cp" );
-    //
-    // assertFileEquals( null, getTestFile( "src/test/projects/" + projectName + "/output.txt" ),
-    // getTestFile( "src/test/projects/" + projectName + "/target/exec/output.txt" ) );
-    //
-    // // the command executes the test class, this time specifying the dependencies
-    // mojo.setExecutable( "java" );
-    // mojo.setWorkingDirectory( (File) null );
-    // classpath = new Classpath();
-    // List dependencies = new ArrayList();
-    // dependencies.add( "commons-io:commons-io" );
-    // classpath.setDependencies( dependencies );
-    // mojo.setArguments( Arrays.asList( new Object[]{"-Dproject.env1=value1", "-classpath", classpath,
-    // "org.codehaus.mojo.exec.test.Test",
-    // new File( "src/test/projects/" + projectName + "/target/exec/output.txt" ).getAbsolutePath(), "arg1",
-    // "arg2"} ) );
-    //
-    // mojo.execute();
-    //
-    // // checking the command line would involve resolving the repository
-    // // checkMojo( "java -cp" );
-    //
-    // assertFileEquals( null, getTestFile( "src/test/projects/" + projectName + "/output.txt" ),
-    // getTestFile( "src/test/projects/" + projectName + "/target/exec/output.txt" ) );
-    // }
-
-    /**
-     * 
-     * @param pom the pom file
-     * @param goal the goal to execute
-     * @return output from System.out during mojo execution
-     * @throws Exception if any exception occurs
-     */
-    protected String execute( File pom, String goal )
-        throws Exception
-    {
-
-        ExecMojo mojo;
-        mojo = (ExecMojo) lookupMojo( goal, pom );
-
-        setUpProject( pom, mojo );
-
-        MavenProject project = (MavenProject) getVariableValueFromObject( mojo, "project" );
-
-        // why isn't this set up by the harness based on the default-value? TODO get to bottom of this!
-        // setVariableValueToObject( mojo, "includeProjectDependencies", Boolean.TRUE );
-        // setVariableValueToObject( mojo, "killAfter", new Long( -1 ) );
-
-        assertNotNull( mojo );
-        assertNotNull( project );
-
-        // trap System.out
-        PrintStream out = System.out;
-        StringOutputStream stringOutputStream = new StringOutputStream();
-        System.setOut( new PrintStream( stringOutputStream ) );
-        // ensure we don't log unnecessary stuff which would interfere with assessing success of tests
-        mojo.setLog( new DefaultLog( new ConsoleLogger( Logger.LEVEL_ERROR, "exec:exec" ) ) );
-
-        try
-        {
-            mojo.execute();
-        }
-        catch ( Throwable e )
-        {
-            e.printStackTrace( System.err );
-            fail( e.getMessage() );
-        }
-        finally
-        {
-            System.setOut( out );
-        }
-
-        return stringOutputStream.toString();
-    }
-
-    private void setUpProject( File pomFile, ExecMojo mojo )
-        throws Exception
-    {
-        super.setUp();
-        
-        MockitoAnnotations.initMocks( this );
-        
-        ProjectBuildingRequest buildingRequest = mock( ProjectBuildingRequest.class );
-        when( session.getProjectBuildingRequest() ).thenReturn( buildingRequest );
-        MavenRepositorySystemSession repositorySession = new MavenRepositorySystemSession();
-        repositorySession.setLocalRepositoryManager( new SimpleLocalRepositoryManager( LOCAL_REPO ) );
-        when( buildingRequest.getRepositorySession() ).thenReturn( repositorySession );
-        
-        ProjectBuilder builder = lookup( ProjectBuilder.class );
-
-        mojo.setBasedir( File.createTempFile( "mvn-temp", "txt" ).getParentFile() );
-
-        MavenProject project = builder.build( pomFile, buildingRequest ).getProject();
-
-        // this gets the classes for these tests of this mojo (exec plugin) onto the project classpath for the test
-        project.getBuild().setOutputDirectory( new File( "target/test-classes" ).getAbsolutePath() );
-
-        mojo.setProject( project );
-
-        mojo.setLog( new SystemStreamLog()
-        {
-            public boolean isDebugEnabled()
-            {
-                return true;
-            }
-        } );
-    }
-
     // MEXEC-12, MEXEC-72
-    public void testGetExecutablePath()
-        throws IOException
-    {
+    @Test
+    @InjectMojo(goal = "exec")
+    void getExecutablePath(ExecMojo realMojo) throws Exception {
 
-        ExecMojo realMojo = new ExecMojo();
-
-        File workdir = new File( System.getProperty( "user.dir" ) );
-        Map<String, String> enviro = new HashMap<String, String>();
+        File workdir = new File(System.getProperty("user.dir"));
+        Map<String, String> enviro = new HashMap<>();
 
         String myJavaPath = "target" + File.separator + "javax";
-        File f = new File( myJavaPath );
-        assertTrue( "file created...", f.createNewFile() );
-        assertTrue( "file exists...", f.exists() );
+        File f = new File(myJavaPath);
+        assertTrue(f.createNewFile(), "file created...");
+        assertTrue(f.exists(), "file exists...");
 
-        realMojo.setExecutable( myJavaPath );
+        realMojo.setExecutable(myJavaPath);
 
-        CommandLine cmd = realMojo.getExecutablePath( enviro, workdir );
-        assertTrue( "File exists so path is absolute",
-                    cmd.getExecutable().startsWith( System.getProperty( "user.dir" ) ) );
+        CommandLine cmd = realMojo.getExecutablePath(enviro, workdir);
+        assertTrue(cmd.getExecutable().startsWith(System.getProperty("user.dir")), "File exists so path is absolute");
 
         f.delete();
-        assertFalse( "file deleted...", f.exists() );
-        cmd = realMojo.getExecutablePath( enviro, workdir );
-        assertEquals( "File doesn't exist. Let the system find it (in that PATH?)", myJavaPath, cmd.getExecutable() );
+        assertFalse(f.exists(), "file deleted...");
+        cmd = realMojo.getExecutablePath(enviro, workdir);
+        assertEquals(myJavaPath, cmd.getExecutable(), "File doesn't exist. Let the system find it (in that PATH?)");
 
-        if ( OS.isFamilyWindows() ) // Exec Maven Plugin only supports Batch detection and PATH search on Windows
+        if (OS.WINDOWS.isCurrentOs()) // Exec Maven Plugin only supports Batch detection and PATH search on Windows
         {
             myJavaPath = "target" + File.separator + "javax.bat";
-            f = new File( myJavaPath );
-            assertTrue( "file created...", f.createNewFile() );
-            assertTrue( "file exists...", f.exists() );
+            f = new File(myJavaPath);
+            assertTrue(f.createNewFile(), "file created...");
+            assertTrue(f.exists(), "file exists...");
 
-            final String comSpec = System.getenv( "ComSpec" );
-            
-            realMojo.setExecutable( "javax.bat" );
-            cmd = realMojo.getExecutablePath( enviro, workdir );
-            assertTrue( "is bat file on windows, execute using ComSpec.", cmd.getExecutable().equals( comSpec ) );
+            final String comSpec = System.getenv("ComSpec");
 
-            enviro.put( "PATH", workdir.getAbsolutePath() + File.separator + "target" );
-            cmd = realMojo.getExecutablePath( enviro, workdir );
-            assertTrue( "is bat file on windows' PATH, execute using ComSpec.", cmd.getExecutable().equals( comSpec ) );
+            // for windows scripts cmd should be used
+            realMojo.setExecutable("javax.bat");
+            cmd = realMojo.getExecutablePath(enviro, workdir);
+            assertEquals(comSpec, cmd.getExecutable(), "is bat file on windows, execute using ComSpec.");
+            assertEquals("/c", cmd.getArguments()[0], "is /c argument pass using ComSpec.");
+
+            String path = workdir.getAbsolutePath() + File.separator + "target";
+            enviro.put("Path", path);
+            realMojo.setExecutable("javax"); // FIXME javax.bat should be also allowed
+            cmd = realMojo.getExecutablePath(enviro, workdir);
+            assertEquals(comSpec, cmd.getExecutable(), "is bat file on windows, execute using ComSpec.");
+            assertEquals("/c", cmd.getArguments()[0], "is /c argument pass using ComSpec.");
+            assertEquals(path + File.separator + "javax.bat", cmd.getArguments()[1], "full path is discovered.");
+
             f.delete();
-            assertFalse( "file deleted...", f.exists() );
+            assertFalse(f.exists(), "file deleted...");
         }
     }
-    
+
     // under Windows cmd/bat files should be preferred over files with the same prefix without extension, e.g.
     // if there are "node" and "node.cmd" the mojo should pick "node.cmd"
     // see https://github.com/mojohaus/exec-maven-plugin/issues/42
-    public void testGetExecutablePathPreferExecutableExtensionsOnWindows()
-    		throws IOException
-    {
-    	// this test is for Windows
-    	if (!OS.isFamilyWindows()) {
-    		return;
-    	}
-    	final ExecMojo realMojo = new ExecMojo();
-    	
-    	final String tmp = System.getProperty("java.io.tmpdir");
-    	final File workdir = new File(tmp, "testGetExecutablePathPreferExecutableExtensionsOnWindows");
-    	workdir.mkdirs();
-    	
-    	final Map<String, String> enviro = new HashMap<String, String>();
-    	
-    	final File f = new File(workdir, "mycmd");
-    	final File fCmd = new File(workdir, "mycmd.cmd");
-    	f.createNewFile();
-    	fCmd.createNewFile();
-    	assertTrue( "file exists...", f.exists() );
-    	assertTrue( "file exists...", fCmd.exists() );
-    	
-    	realMojo.setExecutable( "mycmd" );
-    	
-    	final CommandLine cmd = realMojo.getExecutablePath( enviro, workdir );
-    	// cmdline argumets are: [/c, %path-to-temp%\mycmd.cmd], so check second argument
-    	assertTrue( "File should have cmd extension",
-    			cmd.getArguments()[1].endsWith( "mycmd.cmd" ) );
-    	
-    	f.delete();
-    	fCmd.delete();
-    	assertFalse( "file deleted...", f.exists() );
-    	assertFalse( "file deleted...", fCmd.exists() );
-    	
+    @Test
+    @EnabledOnOs(OS.WINDOWS)
+    void getExecutablePathPreferExecutableExtensionsOnWindows() throws Exception {
+        // this test is for Windows
+        final ExecMojo realMojo = new ExecMojo(repositorySystem, toolchainManager);
+
+        final String tmp = System.getProperty("java.io.tmpdir");
+        final File workdir = new File(tmp, "testGetExecutablePathPreferExecutableExtensionsOnWindows");
+        workdir.mkdirs();
+
+        final Map<String, String> enviro = new HashMap<>();
+
+        final File f = new File(workdir, "mycmd");
+        final File fCmd = new File(workdir, "mycmd.cmd");
+        f.createNewFile();
+        fCmd.createNewFile();
+        assertTrue(f.exists(), "file exists...");
+        assertTrue(fCmd.exists(), "file exists...");
+
+        realMojo.setExecutable("mycmd");
+
+        final CommandLine cmd = realMojo.getExecutablePath(enviro, workdir);
+        // cmdline argumets are: [/c, %path-to-temp%\mycmd.cmd], so check second argument
+        assertTrue(cmd.getArguments()[1].endsWith("mycmd.cmd"), "File should have cmd extension");
+
+        f.delete();
+        fCmd.delete();
+        assertFalse(f.exists(), "file deleted...");
+        assertFalse(fCmd.exists(), "file deleted...");
     }
 
-    public void testRunFailure()
-    {
+    @Test
+    void runFailure() {
         mojo.executeResult = 1;
 
-        try
-        {
+        try {
             mojo.execute();
-            fail( "expected failure" );
-        }
-        catch ( MojoExecutionException e )
-        {
-            assertEquals( "Result of " + mojo.getExecutedCommandline( 0 ) + " execution is: '1'.", e.getMessage() );
+            fail("expected failure");
+        } catch (MojoExecutionException e) {
+            assertEquals("Result of " + mojo.getExecutedCommandline(0) + " execution is: '1'.", e.getMessage());
         }
 
-        checkMojo( SOME_EXECUTABLE + " --version" );
+        checkMojo(SOME_EXECUTABLE + " --version");
     }
 
-    public void testRunError()
-    {
+    @Test
+    void runError() {
         mojo.failureMsg = "simulated failure";
 
-        try
-        {
+        try {
             mojo.execute();
-            fail( "expected failure" );
-        }
-        catch ( MojoExecutionException e )
-        {
-            assertEquals( "Command execution failed.", e.getMessage() );
+            fail("expected failure");
+        } catch (MojoExecutionException e) {
+            assertEquals("Command execution failed.", e.getMessage());
         }
 
-        checkMojo( SOME_EXECUTABLE + " --version" );
+        checkMojo(SOME_EXECUTABLE + " --version");
     }
 
-    public void testOverrides()
-        throws MojoExecutionException
-    {
-        mojo.systemProperties.put( "exec.args", "-f pom.xml" );
+    @Test
+    void overrides() throws Exception {
+        mojo.systemProperties.put("exec.args", "-f pom.xml");
         mojo.execute();
 
-        checkMojo( SOME_EXECUTABLE + " -f pom.xml" );
+        checkMojo(SOME_EXECUTABLE + " -f pom.xml");
     }
 
-    public void testOverrides3()
-        throws MojoExecutionException
-    {
-        mojo.systemProperties.put( "exec.args", null );
+    @Test
+    void overrides3() throws Exception {
+        mojo.systemProperties.put("exec.args", null);
         mojo.execute();
 
-        checkMojo( SOME_EXECUTABLE + " --version" );
+        checkMojo(SOME_EXECUTABLE + " --version");
 
         mojo.commandLines.clear();
-        mojo.systemProperties.put( "exec.args", "" );
+        mojo.systemProperties.put("exec.args", "");
         mojo.execute();
 
-        checkMojo( SOME_EXECUTABLE + " --version" );
+        checkMojo(SOME_EXECUTABLE + " --version");
     }
 
-    public void testIsResultCodeAFailure()
-    {
-        ExecMojo execMojo = new ExecMojo();
-        assertTrue( execMojo.isResultCodeAFailure( 1 ) );
-        assertFalse( execMojo.isResultCodeAFailure( 0 ) );
+    @Test
+    @InjectMojo(goal = "exec")
+    void isResultCodeAFailure(ExecMojo execMojo) {
+        assertTrue(execMojo.isResultCodeAFailure(1));
+        assertFalse(execMojo.isResultCodeAFailure(0));
 
-        execMojo.setSuccessCodes( new Integer[0] );
-        assertTrue( execMojo.isResultCodeAFailure( 1 ) );
-        assertFalse( execMojo.isResultCodeAFailure( 0 ) );
+        execMojo.setSuccessCodes();
+        assertTrue(execMojo.isResultCodeAFailure(1));
+        assertFalse(execMojo.isResultCodeAFailure(0));
 
-        execMojo.setSuccessCodes( new Integer[] { Integer.valueOf( "2" ), Integer.valueOf( "5" ) } );
-        assertTrue( execMojo.isResultCodeAFailure( 0 ) );
-        assertTrue( execMojo.isResultCodeAFailure( 10 ) );
-        assertFalse( execMojo.isResultCodeAFailure( 2 ) );
-        assertFalse( execMojo.isResultCodeAFailure( 5 ) );
+        execMojo.setSuccessCodes(Integer.valueOf("2"), Integer.valueOf("5"));
+        assertTrue(execMojo.isResultCodeAFailure(0));
+        assertTrue(execMojo.isResultCodeAFailure(10));
+        assertFalse(execMojo.isResultCodeAFailure(2));
+        assertFalse(execMojo.isResultCodeAFailure(5));
     }
 
     // MEXEC-81
-    public void testParseCommandlineOSWin()
-        throws Exception
-    {
-        ExecMojo execMojo = new ExecMojo();
+    @Test
+    @InjectMojo(goal = "exec")
+    void parseCommandlineOSWin(ExecMojo execMojo) throws Exception {
         final String javaHome = "C:\\Java\\jdk1.5.0_15";
         // can only be set by expression or plugin-configuration
-        setVariableValueToObject( execMojo, "commandlineArgs", javaHome );
+        setVariableValueToObject(execMojo, "commandlineArgs", javaHome);
         String[] args = execMojo.parseCommandlineArgs();
-        assertEquals( javaHome, args[0] );
+        assertEquals(javaHome, args[0]);
     }
 
-    private void checkMojo( String expectedCommandLine )
-    {
-        assertEquals( 1, mojo.getAmountExecutedCommandLines() );
-        CommandLine commandline = mojo.getExecutedCommandline( 0 );
+    @Test
+    @InjectMojo(goal = "exec")
+    void exec_receives_all_parameters(ExecMojo execMojo) throws Exception {
+        // given
+        execMojo.setExecutable("mkdir");
+        execMojo.setArguments(Arrays.asList("-p", "dist/mails"));
+        execMojo.setBasedir(new File("target"));
+
+        // when
+        final CommandLine commandLine = execMojo.getExecutablePath(emptyMap(), new File("target"));
+        execMojo.execute();
+
+        // then
+        assertTrue(Paths.get("target", "dist", "mails").toFile().exists(), "dir should have been created");
+    }
+
+    @Test
+    @InjectMojo(goal = "exec", pom = "src/test/projects/project20/pom.xml")
+    @DisabledOnOs(OS.WINDOWS)
+    void toolchainJavaHomePropertySetWhenToolchainIsUsed(ExecMojo execMojo) throws Exception {
+        // given
+        File basedir;
+        String testJavaPath;
+
+        testJavaPath = "/path/to/java/home";
+        when(toolchainManager.getToolchainFromBuildContext(any(), eq(session)))
+                .thenReturn(new DummyJdkToolchain(testJavaPath + "/bin/java"));
+
+        basedir = new File("target");
+        execMojo.setBasedir(basedir);
+
+        // when
+        execMojo.execute();
+
+        // then
+        Path resultFilePath = basedir.toPath().resolve("testfile.txt");
+        String result = new String(Files.readAllBytes(resultFilePath), StandardCharsets.UTF_8);
+        assertTrue(result.contains(testJavaPath));
+    }
+
+    @Test
+    @InjectMojo(goal = "exec", pom = "src/test/projects/project21/pom.xml")
+    @EnabledOnOs(OS.WINDOWS)
+    void toolchainJavaHomePropertySetWhenToolchainIsUsedWindows(ExecMojo execMojo) throws Exception {
+        // given
+        File basedir;
+        String testJavaPath;
+
+        testJavaPath = "\\path\\to\\java\\home";
+        when(toolchainManager.getToolchainFromBuildContext(any(), eq(session)))
+                .thenReturn(new DummyJdkToolchain(testJavaPath + "\\bin\\java"));
+
+        basedir = new File("target");
+        execMojo.setBasedir(basedir);
+
+        // when
+        execMojo.execute();
+
+        // then
+        Path resultFilePath = basedir.toPath().resolve("testfile.txt");
+        String result = new String(Files.readAllBytes(resultFilePath), StandardCharsets.UTF_8);
+        assertTrue(result.contains(testJavaPath));
+    }
+
+    private void checkMojo(String expectedCommandLine) {
+        assertEquals(1, mojo.getAmountExecutedCommandLines());
+        CommandLine commandline = mojo.getExecutedCommandline(0);
         // do NOT depend on Commandline toString()
-        assertEquals( expectedCommandLine, getCommandLineAsString( commandline ) );
+        assertEquals(expectedCommandLine, getCommandLineAsString(commandline));
     }
 
-    private String getCommandLineAsString( CommandLine commandline )
-    {
+    private String getCommandLineAsString(CommandLine commandline) {
         // for the sake of the test comparisons, cut out the eventual
         // cmd /c *.bat conversion
         String result = commandline.getExecutable();
         boolean isCmd = false;
-        if ( OS.isFamilyWindows() && result.equals( "cmd" ) )
-        {
+
+        if (OS.WINDOWS.isCurrentOs() && result.equals("cmd")) {
             result = "";
             isCmd = true;
         }
         String[] arguments = commandline.getArguments();
-        for ( int i = 0; i < arguments.length; i++ )
-        {
+        for (int i = 0; i < arguments.length; i++) {
             String arg = arguments[i];
-            if ( isCmd && i == 0 && "/c".equals( arg ) )
-            {
+            if (isCmd && i == 0 && "/c".equals(arg)) {
                 continue;
             }
-            if ( isCmd && i == 1 && arg.endsWith( ".bat" ) )
-            {
-                arg = arg.substring( 0, arg.length() - ".bat".length() );
+            if (isCmd && i == 1 && arg.endsWith(".bat")) {
+                arg = arg.substring(0, arg.length() - ".bat".length());
             }
-            result += ( result.length() == 0 ? "" : " " ) + arg;
+            result += (result.length() == 0 ? "" : " ") + arg;
         }
         return result;
     }
 
+    @Test
+    @InjectMojo(goal = "exec")
+    void getShebang(ExecMojo execMojo) throws Exception {
+        // without shebang
+        File noShebang = Files.createTempFile("noShebang", ".sh").toFile();
+        Files.write(noShebang.toPath(), Collections.singletonList("echo hello"), StandardCharsets.UTF_8);
+        assertNull(execMojo.getShebang(noShebang));
+        noShebang.delete();
+
+        // with shebang
+        File withShebang = Files.createTempFile("withShebang", ".sh").toFile();
+        Files.write(withShebang.toPath(), Arrays.asList("#!/bin/bash -x", "echo hello"), StandardCharsets.UTF_8);
+        assertEquals("/bin/bash -x", execMojo.getShebang(withShebang));
+        withShebang.delete();
+
+        // with shebang but no args
+        File withShebangNoArgs =
+                Files.createTempFile("withShebangNoArgs", ".sh").toFile();
+        Files.write(
+                withShebangNoArgs.toPath(),
+                Arrays.asList("#!/usr/bin/env python3", "print('hello')"),
+                StandardCharsets.UTF_8);
+        assertEquals("/usr/bin/env python3", execMojo.getShebang(withShebangNoArgs));
+        withShebangNoArgs.delete();
+    }
+
+    @Test
+    @InjectMojo(goal = "exec")
+    void createEnvWrapperFile(ExecMojo execMojo) throws Exception {
+
+        // without shebang
+        File envScript = Files.createTempFile("envScript", ".sh").toFile();
+        Files.write(
+                envScript.toPath(), Collections.singletonList("export TEST_VAR=test_value"), StandardCharsets.UTF_8);
+        File wrapper = execMojo.createEnvWrapperFile(envScript);
+        List<String> lines = Files.readAllLines(wrapper.toPath(), StandardCharsets.UTF_8);
+
+        if (OS.WINDOWS.isCurrentOs()) {
+            assertEquals("@echo off", lines.get(0));
+            assertTrue(lines.get(1).startsWith("call \""));
+            assertTrue(lines.get(1).endsWith(envScript.getCanonicalPath() + "\""));
+            assertEquals("echo " + EnvStreamConsumer.START_PARSING_INDICATOR, lines.get(2));
+            assertEquals("set", lines.get(3));
+        } else {
+            assertEquals("#!/bin/sh", lines.get(0));
+            assertEquals(". " + envScript.getCanonicalPath(), lines.get(1));
+            assertEquals("echo " + EnvStreamConsumer.START_PARSING_INDICATOR, lines.get(2));
+            assertEquals("env", lines.get(3));
+        }
+        wrapper.delete();
+        envScript.delete();
+
+        // with shebang
+        File envScriptWithShebang =
+                Files.createTempFile("envScriptWithShebang", ".sh").toFile();
+        Files.write(
+                envScriptWithShebang.toPath(),
+                Arrays.asList("#!/bin/bash", "export TEST_VAR=test_value"),
+                StandardCharsets.UTF_8);
+        File wrapper2 = execMojo.createEnvWrapperFile(envScriptWithShebang);
+        List<String> lines2 = Files.readAllLines(wrapper2.toPath(), StandardCharsets.UTF_8);
+
+        if (OS.WINDOWS.isCurrentOs()) {
+            assertEquals("@echo off", lines2.get(0));
+            assertTrue(lines2.get(1).startsWith("call \""));
+            assertTrue(lines2.get(1).endsWith(envScriptWithShebang.getCanonicalPath() + "\""));
+            assertEquals("echo " + EnvStreamConsumer.START_PARSING_INDICATOR, lines2.get(2));
+            assertEquals("set", lines2.get(3));
+        } else {
+            assertEquals("#!/bin/bash", lines2.get(0));
+            assertEquals(". " + envScriptWithShebang.getCanonicalPath(), lines2.get(1));
+            assertEquals("echo " + EnvStreamConsumer.START_PARSING_INDICATOR, lines2.get(2));
+            assertEquals("env", lines2.get(3));
+        }
+        wrapper2.delete();
+        envScriptWithShebang.delete();
+    }
 }

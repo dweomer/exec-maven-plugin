@@ -19,7 +19,10 @@ package org.codehaus.mojo.exec;
  * under the License.
  */
 
+import javax.inject.Inject;
+
 import java.io.BufferedOutputStream;
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.FileWriter;
@@ -27,7 +30,9 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.net.URL;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -35,15 +40,16 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.Properties;
+import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.function.Consumer;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
 import java.util.jar.Manifest;
+import java.util.regex.Pattern;
 
 import org.apache.commons.exec.CommandLine;
-import org.apache.commons.exec.DefaultExecutor;
 import org.apache.commons.exec.ExecuteException;
 import org.apache.commons.exec.ExecuteResultHandler;
 import org.apache.commons.exec.ExecuteWatchdog;
@@ -63,14 +69,13 @@ import org.apache.maven.plugins.annotations.ResolutionScope;
 import org.apache.maven.project.MavenProject;
 import org.apache.maven.toolchain.Toolchain;
 import org.apache.maven.toolchain.ToolchainManager;
-import org.codehaus.plexus.component.repository.exception.ComponentLookupException;
-import org.codehaus.plexus.util.IOUtil;
 import org.codehaus.plexus.util.StringUtils;
 import org.codehaus.plexus.util.cli.CommandLineException;
 import org.codehaus.plexus.util.cli.CommandLineUtils;
 import org.codehaus.plexus.util.cli.Commandline;
 import org.codehaus.plexus.util.cli.DefaultConsumer;
 import org.codehaus.plexus.util.cli.StreamConsumer;
+import org.eclipse.aether.RepositorySystem;
 
 /**
  * A Plugin for executing external programs.
@@ -79,10 +84,14 @@ import org.codehaus.plexus.util.cli.StreamConsumer;
  * @version $Id$
  * @since 1.0
  */
-@Mojo( name = "exec", threadSafe = true, requiresDependencyResolution = ResolutionScope.TEST )
-public class ExecMojo
-    extends AbstractExecMojo
-{
+@Mojo(name = "exec", threadSafe = true, requiresDependencyResolution = ResolutionScope.TEST)
+public class ExecMojo extends AbstractExecMojo {
+
+    /**
+     * Trying to recognize whether the given {@link #executable} might be a {@code java} binary.
+     */
+    private static final Pattern ENDS_WITH_JAVA = Pattern.compile("^.*java(\\.exe|\\.bin)?$", Pattern.CASE_INSENSITIVE);
+
     /**
      * <p>
      * The executable. Can be a full path or the name of the executable. In the latter case, the executable must be in
@@ -101,7 +110,7 @@ public class ExecMojo
      *
      * @since 1.0
      */
-    @Parameter( property = "exec.executable" )
+    @Parameter(property = "exec.executable")
     private String executable;
 
     /**
@@ -116,7 +125,7 @@ public class ExecMojo
      *
      * @since 3.0.0
      */
-    @Parameter( property = "exec.timeout", defaultValue = "0" )
+    @Parameter(property = "exec.timeout", defaultValue = "0")
     private int timeout;
 
     /**
@@ -124,7 +133,7 @@ public class ExecMojo
      * The toolchain. If omitted, <code>"jdk"</code> is assumed.
      * </p>
      */
-    @Parameter( property = "exec.toolchain", defaultValue = "jdk" )
+    @Parameter(property = "exec.toolchain", defaultValue = "jdk")
     private String toolchain;
 
     /**
@@ -132,7 +141,7 @@ public class ExecMojo
      *
      * @since 1.0
      */
-    @Parameter( property = "exec.workingdir" )
+    @Parameter(property = "exec.workingdir")
     private File workingDirectory;
 
     /**
@@ -145,7 +154,7 @@ public class ExecMojo
      * @see java.lang.System#err
      * @see java.lang.System#in
      */
-    @Parameter( property = "exec.outputFile" )
+    @Parameter(property = "exec.outputFile")
     private File outputFile;
 
     /**
@@ -155,7 +164,7 @@ public class ExecMojo
      * @since 3.0.1
      * @see ProcessBuilder#inheritIO()
      */
-    @Parameter( property = "exec.inheritIo" )
+    @Parameter(property = "exec.inheritIo")
     private boolean inheritIo;
 
     /**
@@ -221,7 +230,7 @@ public class ExecMojo
      * @see java.lang.System#err
      * @see java.lang.System#in
      */
-    @Parameter( property = "exec.useMavenLogger", defaultValue = "false" )
+    @Parameter(property = "exec.useMavenLogger", defaultValue = "false")
     private boolean useMavenLogger;
 
     /**
@@ -231,7 +240,7 @@ public class ExecMojo
      *
      * @since 3.0.0
      */
-    @Parameter( property = "exec.quietLogs", defaultValue = "false" )
+    @Parameter(property = "exec.quietLogs", defaultValue = "false")
     private boolean quietLogs;
 
     /**
@@ -248,13 +257,13 @@ public class ExecMojo
     /**
      * @since 1.0
      */
-    @Parameter( readonly = true, required = true, defaultValue = "${basedir}" )
+    @Parameter(readonly = true, required = true, defaultValue = "${basedir}")
     private File basedir;
 
     /**
      * @since 3.0.0
      */
-    @Parameter( readonly = true, required = true, defaultValue = "${project.build.directory}" )
+    @Parameter(readonly = true, required = true, defaultValue = "${project.build.directory}")
     private File buildDirectory;
 
     /**
@@ -268,23 +277,19 @@ public class ExecMojo
      * @since 1.1-beta-2
      */
     @Parameter
-    private Map<String, String> environmentVariables = new HashMap<String, String>();
+    private Map<String, String> environmentVariables = new HashMap<>();
 
     /**
-     * Environment script to be merged with <i>environmentVariables</i> This script is platform specifics, on Unix its
-     * must be Bourne shell format. Use this feature if you have a need to create environment variable dynamically such
-     * as invoking Visual Studio environment script file
+     * Environment script to be merged with <i>environmentVariables</i>. on Unix-like system if the script
+     * contains a shebang line, the executable filename is read from the shebang line; otherwise,
+     * Bourne shell format is used.
+     * Use this feature if you have a need to create environment variable dynamically such as invoking
+     * Visual Studio environment script file.
      *
      * @since 1.4.0
      */
     @Parameter
     private File environmentScript = null;
-
-    /**
-     * The current build session instance. This is used for toolchain manager API calls.
-     */
-    @Parameter( defaultValue = "${session}", readonly = true )
-    private MavenSession session;
 
     /**
      * Exit codes to be resolved as successful execution for non-compliant applications (applications not returning 0
@@ -301,7 +306,7 @@ public class ExecMojo
      *
      * @since 1.1.2
      */
-    @Parameter( property = "exec.longClasspath", defaultValue = "false" )
+    @Parameter(property = "exec.longClasspath", defaultValue = "false")
     private boolean longClasspath;
 
     /**
@@ -310,13 +315,25 @@ public class ExecMojo
      *
      * @since 1.1.2
      */
-    @Parameter( property = "exec.longModulepath", defaultValue = "true" )
+    @Parameter(property = "exec.longModulepath", defaultValue = "true")
     private boolean longModulepath;
+
+    /**
+     * Forces the plugin to recognize the given executable as java executable. This helps with {@link #longClasspath}
+     * and {@link #longModulepath} parameters.
+     *
+     * <p>You shouldn't normally be needing this unless you renamed your java binary or are executing tools
+     * other than {@code java} which need modulepath or classpath parameters in a separate file.</p>
+     *
+     * @since 3.1.1
+     */
+    @Parameter(property = "exec.forceJava", defaultValue = "false")
+    private boolean forceJava;
 
     /**
      * If set to true the child process executes asynchronously and build execution continues in parallel.
      */
-    @Parameter( property = "exec.async", defaultValue = "false" )
+    @Parameter(property = "exec.async", defaultValue = "false")
     private boolean async;
 
     /**
@@ -324,228 +341,186 @@ public class ExecMojo
      * child process continues execution after JVM shutdown. Applies only to asynchronous processes; ignored for
      * synchronous processes.
      */
-    @Parameter( property = "exec.asyncDestroyOnShutdown", defaultValue = "true" )
+    @Parameter(property = "exec.asyncDestroyOnShutdown", defaultValue = "true")
     private boolean asyncDestroyOnShutdown = true;
+
+    /**
+     * Name of environment variable that will contain path to java executable provided by the toolchain (works only if JDK toolchain feature is used)
+     *
+     * @since 3.5.0
+     */
+    @Parameter(property = "exec.toolchainJavaHomeEnvName", defaultValue = "TOOLCHAIN_JAVA_HOME")
+    private String toolchainJavaHomeEnvName = "TOOLCHAIN_JAVA_HOME";
+
+    private final ToolchainManager toolchainManager;
 
     public static final String CLASSPATH_TOKEN = "%classpath";
 
     public static final String MODULEPATH_TOKEN = "%modulepath";
+
+    @Inject
+    protected ExecMojo(RepositorySystem repositorySystem, ToolchainManager toolchainManager) {
+        super(repositorySystem);
+        this.toolchainManager = Objects.requireNonNull(toolchainManager);
+    }
 
     /**
      * priority in the execute method will be to use System properties arguments over the pom specification.
      *
      * @throws MojoExecutionException if a failure happens
      */
-    public void execute()
-        throws MojoExecutionException
-    {
-        if ( executable == null )
-        {
-            if (executableDependency == null)
-            {
-                throw new MojoExecutionException( "The parameter 'executable' is missing or invalid" );
+    public void execute() throws MojoExecutionException {
+        if (executable == null) {
+            if (executableDependency == null) {
+                throw new MojoExecutionException("The parameter 'executable' is missing or invalid");
             }
 
             executable = findExecutableArtifact().getFile().getAbsolutePath();
-            getLog().debug( "using executable dependency " + executable);
+            getLog().debug("using executable dependency " + executable);
         }
 
-        if ( isSkip() )
-        {
-            getLog().info( "skipping execute as per configuration" );
+        if (isSkip()) {
+            getLog().info("skipping execute as per configuration");
             return;
         }
 
-        if ( basedir == null )
-        {
-            throw new IllegalStateException( "basedir is null. Should not be possible." );
+        if (basedir == null) {
+            throw new IllegalStateException("basedir is null. Should not be possible.");
         }
 
-        try
-        {
+        try {
 
             handleWorkingDirectory();
 
-            String argsProp = getSystemProperty( "exec.args" );
+            String argsProp = getSystemProperty("exec.args");
 
-            List<String> commandArguments = new ArrayList<String>();
+            List<String> commandArguments = new ArrayList<>();
 
-            if ( hasCommandlineArgs() )
-            {
-                handleCommandLineArgs( commandArguments );
-            }
-            else if ( !StringUtils.isEmpty( argsProp ) )
-            {
-                handleSystemPropertyArguments( argsProp, commandArguments );
-            }
-            else
-            {
-                if ( arguments != null )
-                {
-                    handleArguments( commandArguments );
+            if (hasCommandlineArgs()) {
+                handleCommandLineArgs(commandArguments);
+            } else if (!StringUtils.isEmpty(argsProp)) {
+                handleSystemPropertyArguments(argsProp, commandArguments);
+            } else {
+                if (arguments != null) {
+                    handleArguments(commandArguments);
                 }
             }
 
             Map<String, String> enviro = handleSystemEnvVariables();
 
-            CommandLine commandLine = getExecutablePath( enviro, workingDirectory );
+            CommandLine commandLine = getExecutablePath(enviro, workingDirectory);
 
-            String[] args = commandArguments.toArray( new String[commandArguments.size()] );
+            String[] args = commandArguments.toArray(new String[commandArguments.size()]);
 
-            commandLine.addArguments( args, false );
+            commandLine.addArguments(args, false);
 
-            Executor exec = new ExtendedExecutor( inheritIo );
-            if ( this.timeout > 0 )
-            {
-                exec.setWatchdog( new ExecuteWatchdog( this.timeout ) );
+            Executor exec = new ExtendedExecutor(inheritIo);
+            if (this.timeout > 0) {
+                exec.setWatchdog(new ExecuteWatchdog(this.timeout));
             }
-            exec.setWorkingDirectory( workingDirectory );
-            fillSuccessCodes( exec );
+            exec.setWorkingDirectory(workingDirectory);
+            fillSuccessCodes(exec);
 
-            if ( OS.isFamilyOpenVms() && inheritIo )
-            {
-                getLog().warn("The inheritIo flag is not supported on OpenVMS, execution will proceed without stream inheritance.");
+            if (OS.isFamilyOpenVms() && inheritIo) {
+                getLog().warn(
+                                "The inheritIo flag is not supported on OpenVMS, execution will proceed without stream inheritance.");
             }
-            getLog().debug( "Executing command line: " + commandLine );
+            getLog().debug("Executing command line: " + commandLine);
 
-            try
-            {
+            try {
                 int resultCode;
-                if ( outputFile != null )
-                {
-                    if ( !outputFile.getParentFile().exists() && !outputFile.getParentFile().mkdirs() )
-                    {
-                        getLog().warn( "Could not create non existing parent directories for log file: " + outputFile );
+                if (outputFile != null) {
+                    if (!outputFile.getParentFile().exists()
+                            && !outputFile.getParentFile().mkdirs()) {
+                        getLog().warn("Could not create non existing parent directories for log file: " + outputFile);
                     }
 
-                    FileOutputStream outputStream = null;
-                    try
-                    {
-                        outputStream = new FileOutputStream( outputFile );
-
-                        resultCode = executeCommandLine( exec, commandLine, enviro, outputStream );
+                    try (FileOutputStream outputStream = new FileOutputStream(outputFile)) {
+                        resultCode = executeCommandLine(exec, commandLine, enviro, outputStream);
                     }
-                    finally
-                    {
-                        IOUtil.close( outputStream );
-                    }
-                }
-                else if (useMavenLogger)
-                {
+                } else if (useMavenLogger) {
                     getLog().debug("Will redirect program output to Maven logger");
-                    final String parentThreadName = Thread.currentThread().getName();
-                    final String logSuffix = "[" + parentThreadName + "] ";
-                    Invokable<String> mavenOutRedirect = new Invokable<String>()
-                    {
-
-                        @Override
-                        public void accept(String logMessage)
-                        {
-                            if (quietLogs)
-                            {
-                                getLog().debug(logSuffix + logMessage);
-                            }
-                            else
-                            {
-                                getLog().info(logSuffix + logMessage);
-                            }
+                    // If running parallel, append the projects original (i.e. current) thread name to the program
+                    // output as a log prefix, to enable easy tracing of program output when intermixed with other
+                    // Maven log output. NOTE: The accept(..) methods are running in PumpStreamHandler thread,
+                    // which is why we capture the thread name prefix here.
+                    final String logPrefix = getSession().isParallel()
+                            ? "[" + Thread.currentThread().getName() + "] "
+                            : "";
+                    Consumer<String> mavenOutRedirect = logMessage -> {
+                        if (quietLogs) {
+                            getLog().debug(logPrefix + logMessage);
+                        } else {
+                            getLog().info(logPrefix + logMessage);
                         }
                     };
-                    Invokable<String> mavenErrRedirect = new Invokable<String>()
-                    {
-
-                        @Override
-                        public void accept(String logMessage)
-                        {
-                            getLog().error(logSuffix + logMessage);
-                        }
-                    };
+                    Consumer<String> mavenErrRedirect = logMessage -> getLog().error(logPrefix + logMessage);
 
                     try (OutputStream out = new LineRedirectOutputStream(mavenOutRedirect);
                             OutputStream err = new LineRedirectOutputStream(mavenErrRedirect)) {
                         resultCode = executeCommandLine(exec, commandLine, enviro, out, err);
                     }
-                }
-                else
-                {
-                    resultCode = executeCommandLine( exec, commandLine, enviro, System.out, System.err );
+                } else {
+                    resultCode = executeCommandLine(exec, commandLine, enviro, System.out, System.err);
                 }
 
-                if ( isResultCodeAFailure( resultCode ) )
-                {
+                if (isResultCodeAFailure(resultCode)) {
                     String message = "Result of " + commandLine.toString() + " execution is: '" + resultCode + "'.";
-                    getLog().error( message );
-                    throw new MojoExecutionException( message );
+                    getLog().error(message);
+                    throw new MojoExecutionException(message);
                 }
-            }
-            catch ( ExecuteException e )
-            {
-                if ( exec.getWatchdog() != null && exec.getWatchdog().killedProcess() )
-                {
+            } catch (ExecuteException e) {
+                if (exec.getWatchdog() != null && exec.getWatchdog().killedProcess()) {
                     final String message = "Timeout. Process runs longer than " + this.timeout + " ms.";
-                    getLog().error( message );
-                    throw new MojoExecutionException( message, e );
+                    getLog().error(message);
+                    throw new MojoExecutionException(message, e);
+                } else {
+                    getLog().error("Command execution failed.", e);
+                    throw new MojoExecutionException("Command execution failed.", e);
                 }
-                else
-                {
-                    getLog().error( "Command execution failed.", e );
-                    throw new MojoExecutionException( "Command execution failed.", e );
-                }
-            }
-            catch ( IOException e )
-            {
-                getLog().error( "Command execution failed.", e );
-                throw new MojoExecutionException( "Command execution failed.", e );
+            } catch (IOException e) {
+                getLog().error("Command execution failed.", e);
+                throw new MojoExecutionException("Command execution failed.", e);
             }
 
             registerSourceRoots();
-        }
-        catch ( IOException e )
-        {
-            throw new MojoExecutionException( "I/O Error", e );
+        } catch (IOException e) {
+            throw new MojoExecutionException("I/O Error", e);
         }
     }
 
-    private Map<String, String> handleSystemEnvVariables()
-        throws MojoExecutionException
-    {
-
-        Map<String, String> enviro = new HashMap<String, String>();
-        try
-        {
-            Properties systemEnvVars = CommandLineUtils.getSystemEnvVars();
-            for ( Map.Entry<?, ?> entry : systemEnvVars.entrySet() )
-            {
-                enviro.put( (String) entry.getKey(), (String) entry.getValue() );
-            }
-        }
-        catch ( IOException x )
-        {
-            getLog().error( "Could not assign default system enviroment variables.", x );
+    private Map<String, String> handleSystemEnvVariables() throws MojoExecutionException {
+        // Avoid creating env vars that differ only in case on Windows.
+        // https://github.com/mojohaus/exec-maven-plugin/issues/328
+        // It is not enough to avoid duplicates; we must preserve the case found in the "natural" environment.
+        // https://developercommunity.visualstudio.com/t/Build-Error:-MSB6001-in-Maven-Build/10527486?sort=newest
+        Map<String, String> enviro = new HashMap<>(System.getenv());
+        if (environmentVariables != null) {
+            enviro.putAll(environmentVariables);
         }
 
-        if ( environmentVariables != null )
-        {
-            enviro.putAll( environmentVariables );
-        }
-
-        if ( this.environmentScript != null )
-        {
-            getLog().info( "Pick up external environment script: " + this.environmentScript );
-            Map<String, String> envVarsFromScript = this.createEnvs( this.environmentScript );
-            if ( envVarsFromScript != null )
-            {
-                enviro.putAll( envVarsFromScript );
+        if (this.environmentScript != null) {
+            getLog().info("Pick up external environment script: " + this.environmentScript);
+            Map<String, String> envVarsFromScript = this.createEnvs(this.environmentScript);
+            if (envVarsFromScript != null) {
+                enviro.putAll(envVarsFromScript);
             }
         }
 
-        if ( this.getLog().isDebugEnabled() )
-        {
-            Set<String> keys = new TreeSet<String>();
-            keys.addAll( enviro.keySet() );
-            for ( String key : keys )
-            {
-                this.getLog().debug( "env: " + key + "=" + enviro.get( key ) );
+        Toolchain tc = getToolchain();
+        if (tc != null && "jdk".equals(tc.getType())) {
+            String toolchainJava = tc.findTool("java");
+            if (toolchainJava != null) {
+                String toolchainJavaHome =
+                        Paths.get(toolchainJava).getParent().getParent().toString();
+                enviro.put(toolchainJavaHomeEnvName, toolchainJavaHome);
+            }
+        }
+
+        if (this.getLog().isDebugEnabled()) {
+            Set<String> keys = new TreeSet<>(enviro.keySet());
+            for (String key : keys) {
+                this.getLog().debug("env: " + key + "=" + enviro.get(key));
             }
         }
 
@@ -559,116 +534,91 @@ public class ExecMojo
      *
      * @throws MojoExecutionException
      */
-    private void handleWorkingDirectory()
-        throws MojoExecutionException
-    {
-        if ( workingDirectory == null )
-        {
+    private void handleWorkingDirectory() throws MojoExecutionException {
+        if (workingDirectory == null) {
             workingDirectory = basedir;
         }
 
-        if ( !workingDirectory.exists() )
-        {
-            getLog().debug( "Making working directory '" + workingDirectory.getAbsolutePath() + "'." );
-            if ( !workingDirectory.mkdirs() )
-            {
-                throw new MojoExecutionException( "Could not make working directory: '"
-                    + workingDirectory.getAbsolutePath() + "'" );
+        if (!workingDirectory.exists()) {
+            getLog().debug("Making working directory '" + workingDirectory.getAbsolutePath() + "'.");
+            if (!workingDirectory.mkdirs()) {
+                throw new MojoExecutionException(
+                        "Could not make working directory: '" + workingDirectory.getAbsolutePath() + "'");
             }
         }
     }
 
-    private void handleSystemPropertyArguments( String argsProp, List<String> commandArguments )
-        throws MojoExecutionException
-    {
-        getLog().debug( "got arguments from system properties: " + argsProp );
+    private void handleSystemPropertyArguments(String argsProp, List<String> commandArguments)
+            throws MojoExecutionException {
+        getLog().debug("got arguments from system properties: " + argsProp);
 
-        try
-        {
-            String[] args = CommandLineUtils.translateCommandline( argsProp );
-            commandArguments.addAll( Arrays.asList( args ) );
-        }
-        catch ( Exception e )
-        {
-            throw new MojoExecutionException( "Couldn't parse systemproperty 'exec.args'" );
+        try {
+            String[] args = CommandLineUtils.translateCommandline(argsProp);
+            commandArguments.addAll(Arrays.asList(args));
+        } catch (Exception e) {
+            throw new MojoExecutionException("Couldn't parse systemproperty 'exec.args'");
         }
     }
 
-    private void handleCommandLineArgs( List<String> commandArguments )
-        throws MojoExecutionException, IOException
-    {
+    private void handleCommandLineArgs(List<String> commandArguments) throws MojoExecutionException, IOException {
         String[] args = parseCommandlineArgs();
-        for ( int i = 0; i < args.length; i++ )
-        {
-            if ( isLongClassPathArgument( args[i] ) )
-            {
+        for (int i = 0; i < args.length; i++) {
+            if (isLongClassPathArgument(args[i])) {
                 // it is assumed that starting from -cp or -classpath the arguments
                 // are: -classpath/-cp %classpath mainClass
                 // the arguments are replaced with: -jar $TMP/maven-exec.jar
                 // NOTE: the jar will contain the classpath and the main class
-                commandArguments.add( "-jar" );
-                File tmpFile = createJar( computePath( null ), args[i + 2] );
-                commandArguments.add( tmpFile.getAbsolutePath() );
+                commandArguments.add("-jar");
+                File tmpFile = createJar(computePath(null), args[i + 2]);
+                commandArguments.add(tmpFile.getAbsolutePath());
                 i += 2;
-            }
-            else if ( args[i].contains( CLASSPATH_TOKEN ) )
-            {
-                commandArguments.add( args[i].replace( CLASSPATH_TOKEN, computeClasspathString( null ) ) );
-            }
-            else
-            {
-                commandArguments.add( args[i] );
+            } else if (args[i].contains(CLASSPATH_TOKEN)) {
+                commandArguments.add(args[i].replace(CLASSPATH_TOKEN, computeClasspathString(null)));
+            } else if (args[i].contains(MODULEPATH_TOKEN)) {
+                commandArguments.add(args[i].replace(MODULEPATH_TOKEN, computeClasspathString(null)));
+            } else {
+                commandArguments.add(args[i]);
             }
         }
     }
 
-    private void handleArguments( List<String> commandArguments )
-        throws MojoExecutionException, IOException
-    {
+    private void handleArguments(List<String> commandArguments) throws MojoExecutionException, IOException {
         String specialArg = null;
 
-        for ( int i = 0; i < arguments.size(); i++ )
-        {
-            Object argument = arguments.get( i );
+        for (int i = 0; i < arguments.size(); i++) {
+            Object argument = arguments.get(i);
 
-            if ( specialArg != null )
-            {
-                if ( isLongClassPathArgument( specialArg ) && argument instanceof Classpath )
-                {
+            if (specialArg != null) {
+                if (isLongClassPathArgument(specialArg) && argument instanceof Classpath) {
                     // it is assumed that starting from -cp or -classpath the arguments
                     // are: -classpath/-cp %classpath mainClass
                     // the arguments are replaced with: -jar $TMP/maven-exec.jar
                     // NOTE: the jar will contain the classpath and the main class
-                    commandArguments.add( "-jar" );
+                    commandArguments.add("-jar");
 
-                    File tmpFile = createJar( computePath( (Classpath) argument ),
-                                              (String) arguments.get( ++i ) );
-                    commandArguments.add( tmpFile.getAbsolutePath() );
-                }
-                else if ( isLongModulePathArgument( specialArg ) && argument instanceof Modulepath )
-                {
-                    String filePath = new File( buildDirectory, "modulepath" ).getAbsolutePath();
+                    File tmpFile = createJar(computePath((Classpath) argument), (String) arguments.get(++i));
+                    commandArguments.add(tmpFile.getAbsolutePath());
+                } else if (isLongModulePathArgument(specialArg) && argument instanceof Modulepath) {
+                    String filePath = new File(buildDirectory, "modulepath").getAbsolutePath();
 
                     StringBuilder modulePath = new StringBuilder();
-                    modulePath.append( '"' );
+                    modulePath.append('"');
 
-                    for ( Iterator<String> it = computePath( (Modulepath) argument ).iterator(); it.hasNext(); )
-                    {
-                        modulePath.append( it.next().replace( "\\", "\\\\" ) );
-                        if ( it.hasNext() )
-                        {
-                            modulePath.append( File.pathSeparatorChar );
+                    for (Iterator<String> it =
+                                    computePath((Modulepath) argument).iterator();
+                            it.hasNext(); ) {
+                        modulePath.append(it.next().replace("\\", "\\\\"));
+                        if (it.hasNext()) {
+                            modulePath.append(File.pathSeparatorChar);
                         }
                     }
 
-                    modulePath.append( '"' );
+                    modulePath.append('"');
 
-                    createArgFile( filePath, Arrays.asList( "-p", modulePath.toString() ) );
-                    commandArguments.add( '@' + filePath );
-                }
-                else
-                {
-                    commandArguments.add( specialArg );
+                    createArgFile(filePath, Arrays.asList("-p", modulePath.toString()));
+                    commandArguments.add('@' + filePath);
+                } else {
+                    commandArguments.add(specialArg);
                 }
 
                 specialArg = null;
@@ -676,63 +626,67 @@ public class ExecMojo
                 continue;
             }
 
-            if ( argument instanceof Classpath )
-            {
+            if (argument instanceof Classpath) {
                 Classpath specifiedClasspath = (Classpath) argument;
-                commandArguments.add( computeClasspathString( specifiedClasspath ) );
-            }
-            else if ( argument instanceof Modulepath )
-            {
+                commandArguments.add(computeClasspathString(specifiedClasspath));
+            } else if (argument instanceof Modulepath) {
                 Modulepath specifiedModulepath = (Modulepath) argument;
-                commandArguments.add( computeClasspathString( specifiedModulepath ) );
-            }
-            else if ( (argument instanceof String) && (isLongModulePathArgument( (String) argument ) || isLongClassPathArgument( (String) argument )) )
-            {
+                commandArguments.add(computeClasspathString(specifiedModulepath));
+            } else if ((argument instanceof String)
+                    && (isLongModulePathArgument((String) argument) || isLongClassPathArgument((String) argument))) {
                 specialArg = (String) argument;
-            }
-            else if (argument == null)
-            {
-                commandArguments.add( "" );
-            }
-            else
-            {
-                commandArguments.add( (String) argument );
+            } else if (argument == null) {
+                commandArguments.add("");
+            } else {
+                commandArguments.add((String) argument);
             }
         }
     }
 
-    private void fillSuccessCodes( Executor exec )
-    {
-        if ( successCodes != null && successCodes.length > 0 )
-        {
-            exec.setExitValues( successCodes );
+    private void fillSuccessCodes(Executor exec) {
+        if (successCodes != null && successCodes.length > 0) {
+            exec.setExitValues(successCodes);
         }
     }
 
-    boolean isResultCodeAFailure( int result )
-    {
-        if ( successCodes == null || successCodes.length == 0 )
-        {
+    boolean isResultCodeAFailure(int result) {
+        if (successCodes == null || successCodes.length == 0) {
             return result != 0;
         }
-        for ( int successCode : successCodes )
-        {
-            if ( successCode == result )
-            {
+        for (int successCode : successCodes) {
+            if (successCode == result) {
                 return false;
             }
         }
         return true;
     }
 
-    private boolean isLongClassPathArgument( String arg )
-    {
-        return longClasspath && ( "-classpath".equals( arg ) || "-cp".equals( arg ) );
+    private boolean isLongClassPathArgument(String arg) {
+        return isJavaExec() && longClasspath && ("-classpath".equals(arg) || "-cp".equals(arg));
     }
 
-    private boolean isLongModulePathArgument( String arg )
-    {
-        return longModulepath && ( "--module-path".equals( arg ) || "-p".equals( arg ) );
+    private boolean isLongModulePathArgument(String arg) {
+        return isJavaExec() && longModulepath && ("--module-path".equals(arg) || "-p".equals(arg));
+    }
+
+    /**
+     * Returns {@code true} when a java binary is being executed.
+     *
+     * @return {@code true} when a java binary is being executed.
+     */
+    private boolean isJavaExec() {
+        if (forceJava) {
+            return true;
+        }
+
+        if (this.executable.contains("%JAVA_HOME")
+                || this.executable.contains("${JAVA_HOME}")
+                || this.executable.contains("$JAVA_HOME")) {
+            // also applies to *most* other tools.
+            return true;
+        }
+
+        return ENDS_WITH_JAVA.matcher(this.executable).matches();
     }
 
     /**
@@ -744,14 +698,12 @@ public class ExecMojo
      *            default classpath will be used)
      * @return a platform specific String representation of the classpath
      */
-    private String computeClasspathString( AbstractPath specifiedClasspath )
-    {
-        List<String> resultList = computePath( specifiedClasspath );
+    private String computeClasspathString(AbstractPath specifiedClasspath) throws MojoExecutionException {
+        List<String> resultList = computePath(specifiedClasspath);
         StringBuffer theClasspath = new StringBuffer();
 
-        for ( String str : resultList )
-        {
-            addToClasspath( theClasspath, str );
+        for (String str : resultList) {
+            addToClasspath(theClasspath, str);
         }
 
         return theClasspath.toString();
@@ -766,55 +718,51 @@ public class ExecMojo
      *            default classpath will be used)
      * @return a list of class path elements
      */
-    private List<String> computePath( AbstractPath specifiedClasspath )
-    {
+    private List<String> computePath(AbstractPath specifiedClasspath) throws MojoExecutionException {
         List<Artifact> artifacts = new ArrayList<>();
         List<Path> theClasspathFiles = new ArrayList<>();
         List<String> resultList = new ArrayList<>();
 
-        collectProjectArtifactsAndClasspath( artifacts, theClasspathFiles );
+        collectProjectArtifactsAndClasspath(artifacts, theClasspathFiles);
 
-        if ( ( specifiedClasspath != null ) && ( specifiedClasspath.getDependencies() != null ) )
-        {
-            artifacts = filterArtifacts( artifacts, specifiedClasspath.getDependencies() );
+        Set<Artifact> pluginDependencies = determineRelevantPluginDependencies();
+        if (pluginDependencies != null) {
+            artifacts.addAll(pluginDependencies);
         }
 
-        for ( Path f : theClasspathFiles )
-        {
-            resultList.add( f.toAbsolutePath().toString() );
+        if ((specifiedClasspath != null) && (specifiedClasspath.getDependencies() != null)) {
+            artifacts = filterArtifacts(artifacts, specifiedClasspath.getDependencies());
         }
 
-        for ( Artifact artifact : artifacts )
-        {
-            getLog().debug( "dealing with " + artifact );
-            resultList.add( artifact.getFile().getAbsolutePath() );
+        for (Path f : theClasspathFiles) {
+            resultList.add(f.toAbsolutePath().toString());
+        }
+
+        for (Artifact artifact : artifacts) {
+            getLog().debug("dealing with " + artifact);
+            resultList.add(artifact.getFile().getAbsolutePath());
         }
 
         return resultList;
     }
 
-    private static void addToClasspath( StringBuffer theClasspath, String toAdd )
-    {
-        if ( theClasspath.length() > 0 )
-        {
-            theClasspath.append( File.pathSeparator );
+    private static void addToClasspath(StringBuffer theClasspath, String toAdd) {
+        if (theClasspath.length() > 0) {
+            theClasspath.append(File.pathSeparator);
         }
-        theClasspath.append( toAdd );
+        theClasspath.append(toAdd);
     }
 
-    private List<Artifact> filterArtifacts( List<Artifact> artifacts, Collection<String> dependencies )
-    {
+    private List<Artifact> filterArtifacts(List<Artifact> artifacts, Collection<String> dependencies) {
         AndArtifactFilter filter = new AndArtifactFilter();
 
-        filter.add( new IncludesArtifactFilter( new ArrayList<String>( dependencies ) ) ); // gosh
+        filter.add(new IncludesArtifactFilter(new ArrayList<>(dependencies))); // gosh
 
-        List<Artifact> filteredArtifacts = new ArrayList<Artifact>();
-        for ( Artifact artifact : artifacts )
-        {
-            if ( filter.include( artifact ) )
-            {
-                getLog().debug( "filtering in " + artifact );
-                filteredArtifacts.add( artifact );
+        List<Artifact> filteredArtifacts = new ArrayList<>();
+        for (Artifact artifact : artifacts) {
+            if (filter.include(artifact)) {
+                getLog().debug("filtering in " + artifact);
+                filteredArtifacts.add(artifact);
             }
         }
         return filteredArtifacts;
@@ -822,188 +770,152 @@ public class ExecMojo
 
     private ProcessDestroyer processDestroyer;
 
-    CommandLine getExecutablePath( Map<String, String> enviro, File dir )
-    {
-        File execFile = new File( executable );
+    CommandLine getExecutablePath(Map<String, String> enviro, File dir) {
+        File execFile = new File(executable);
         String exec = null;
-        if ( execFile.isFile() )
-        {
-            getLog().debug( "Toolchains are ignored, 'executable' parameter is set to " + executable );
+        if (execFile.isFile()) {
+            getLog().debug("Toolchains are ignored, 'executable' parameter is set to " + executable);
             exec = execFile.getAbsolutePath();
         }
 
-        if ( exec == null )
-        {
+        if (exec == null) {
             Toolchain tc = getToolchain();
 
             // if the file doesn't exist & toolchain is null, the exec is probably in the PATH...
             // we should probably also test for isFile and canExecute, but the second one is only
             // available in SDK 6.
-            if ( tc != null )
-            {
-                getLog().info( "Toolchain in exec-maven-plugin: " + tc );
-                exec = tc.findTool( executable );
-            }
-            else
-            {
-                if ( OS.isFamilyWindows() )
-                {
-                    List<String> paths = this.getExecutablePaths( enviro );
-                    paths.add( 0, dir.getAbsolutePath() );
+            if (tc != null) {
+                getLog().info("Toolchain in exec-maven-plugin: " + tc);
+                exec = tc.findTool(executable);
+            } else {
+                if (OS.isFamilyWindows()) {
+                    List<String> paths = this.getExecutablePaths(enviro);
+                    paths.add(0, dir.getAbsolutePath());
 
-                    exec = findExecutable( executable, paths );
+                    exec = findExecutable(executable, paths);
                 }
             }
         }
 
-        if ( exec == null )
-        {
+        if (exec == null) {
             exec = executable;
         }
 
         CommandLine toRet;
-        if ( OS.isFamilyWindows() && !hasNativeExtension( exec ) && hasExecutableExtension( exec ) )
-        {
+        if (OS.isFamilyWindows() && !hasNativeExtension(exec) && hasExecutableExtension(exec)) {
             // run the windows batch script in isolation and exit at the end
-            final String comSpec = System.getenv( "ComSpec" );
-            toRet = new CommandLine( comSpec == null ? "cmd" : comSpec );
-            toRet.addArgument( "/c" );
-            toRet.addArgument( exec );
-        }
-        else
-        {
-            toRet = new CommandLine( exec );
+            final String comSpec = System.getenv("ComSpec");
+            toRet = new CommandLine(comSpec == null ? "cmd" : comSpec);
+            toRet.addArgument("/c");
+            toRet.addArgument(exec);
+        } else {
+            toRet = new CommandLine(exec);
         }
 
         return toRet;
     }
 
-    static String findExecutable( final String executable, final List<String> paths )
-    {
+    static String findExecutable(final String executable, final List<String> paths) {
         File f = null;
-        search: for ( final String path : paths )
-        {
-            f = new File( path, executable );
-            if ( !OS.isFamilyWindows() && f.isFile() )
-                break;
+        search:
+        for (final String path : paths) {
+            f = new File(path, executable);
+            if (!OS.isFamilyWindows() && f.isFile()) break;
             else
-                for ( final String extension : getExecutableExtensions() )
-                {
-                    f = new File( path, executable + extension );
-                    if ( f.isFile() )
-                        break search;
+                for (final String extension : getExecutableExtensions()) {
+                    f = new File(path, executable + extension);
+                    if (f.isFile()) break search;
                 }
         }
 
-        if ( f == null || !f.exists() )
-            return null;
+        if (f == null || !f.exists()) return null;
 
         return f.getAbsolutePath();
     }
 
-    private static boolean hasNativeExtension( final String exec )
-    {
+    private static boolean hasNativeExtension(final String exec) {
         final String lowerCase = exec.toLowerCase();
-        return lowerCase.endsWith( ".exe" ) || lowerCase.endsWith( ".com" );
+        return lowerCase.endsWith(".exe") || lowerCase.endsWith(".com");
     }
 
-    private static boolean hasExecutableExtension( final String exec )
-    {
+    private static boolean hasExecutableExtension(final String exec) {
         final String lowerCase = exec.toLowerCase();
-        for ( final String ext : getExecutableExtensions() )
-            if ( lowerCase.endsWith( ext ) )
-                return true;
+        for (final String ext : getExecutableExtensions()) if (lowerCase.endsWith(ext)) return true;
 
         return false;
     }
 
-    private static List<String> getExecutableExtensions()
-    {
-        final String pathExt = System.getenv( "PATHEXT" );
-        return pathExt == null ? Arrays.asList( ".bat", ".cmd" )
-                        : Arrays.asList( StringUtils.split( pathExt.toLowerCase(), File.pathSeparator ) );
+    private static List<String> getExecutableExtensions() {
+        final String pathExt = System.getenv("PATHEXT");
+        return pathExt == null
+                ? Arrays.asList(".bat", ".cmd")
+                : Arrays.asList(StringUtils.split(pathExt.toLowerCase(), File.pathSeparator));
     }
 
-    private List<String> getExecutablePaths( Map<String, String> enviro )
-    {
-        List<String> paths = new ArrayList<String>();
-        paths.add( "" );
+    private List<String> getExecutablePaths(Map<String, String> enviro) {
+        List<String> paths = new ArrayList<>();
+        paths.add("");
 
-        String path = enviro.get( "PATH" );
-        if ( path != null )
-        {
-            paths.addAll( Arrays.asList( StringUtils.split( path, File.pathSeparator ) ) );
-        }
+        enviro.entrySet().stream()
+                .filter(entry -> "PATH".equalsIgnoreCase(entry.getKey()))
+                .map(Map.Entry::getValue)
+                .filter(Objects::nonNull)
+                .map(path -> path.split(File.pathSeparator))
+                .map(Arrays::asList)
+                .forEach(paths::addAll);
 
         return paths;
     }
 
-    protected int executeCommandLine( Executor exec, CommandLine commandLine, Map<String, String> enviro,
-                                      OutputStream out, OutputStream err )
-                                          throws ExecuteException, IOException
-    {
+    protected int executeCommandLine(
+            Executor exec, CommandLine commandLine, Map<String, String> enviro, OutputStream out, OutputStream err)
+            throws IOException {
         // note: don't use BufferedOutputStream here since it delays the outputs MEXEC-138
-        PumpStreamHandler psh = new PumpStreamHandler( out, err, System.in );
-        return executeCommandLine( exec, commandLine, enviro, psh );
+        PumpStreamHandler psh = new PumpStreamHandler(out, err, System.in);
+        return executeCommandLine(exec, commandLine, enviro, psh);
     }
 
-    protected int executeCommandLine( Executor exec, CommandLine commandLine, Map<String, String> enviro,
-                                      FileOutputStream outputFile )
-                                          throws ExecuteException, IOException
-    {
-        BufferedOutputStream bos = new BufferedOutputStream( outputFile );
-        PumpStreamHandler psh = new PumpStreamHandler( bos );
-        return executeCommandLine( exec, commandLine, enviro, psh );
+    protected int executeCommandLine(
+            Executor exec, CommandLine commandLine, Map<String, String> enviro, FileOutputStream outputFile)
+            throws IOException {
+        BufferedOutputStream bos = new BufferedOutputStream(outputFile);
+        PumpStreamHandler psh = new PumpStreamHandler(bos);
+        return executeCommandLine(exec, commandLine, enviro, psh);
     }
 
-    protected int executeCommandLine( Executor exec, final CommandLine commandLine, Map<String, String> enviro,
-                                      final PumpStreamHandler psh )
-                                          throws ExecuteException, IOException
-    {
-        exec.setStreamHandler( psh );
+    protected int executeCommandLine(
+            Executor exec, final CommandLine commandLine, Map<String, String> enviro, final PumpStreamHandler psh)
+            throws IOException {
+        exec.setStreamHandler(psh);
 
         int result;
-        try
-        {
+        try {
             psh.start();
-            if ( async )
-            {
-                if ( asyncDestroyOnShutdown )
-                {
-                    exec.setProcessDestroyer( getProcessDestroyer() );
+            if (async) {
+                if (asyncDestroyOnShutdown) {
+                    exec.setProcessDestroyer(getProcessDestroyer());
                 }
 
-                exec.execute( commandLine, enviro, new ExecuteResultHandler()
-                {
-                    public void onProcessFailed( ExecuteException e )
-                    {
-                        getLog().error( "Async process failed for: " + commandLine, e );
+                exec.execute(commandLine, enviro, new ExecuteResultHandler() {
+                    public void onProcessFailed(ExecuteException e) {
+                        getLog().error("Async process failed for: " + commandLine, e);
                     }
 
-                    public void onProcessComplete( int exitValue )
-                    {
-                        getLog().info( "Async process complete, exit value = " + exitValue + " for: " + commandLine );
-                        try
-                        {
+                    public void onProcessComplete(int exitValue) {
+                        getLog().info("Async process complete, exit value = " + exitValue + " for: " + commandLine);
+                        try {
                             psh.stop();
-                        }
-                        catch ( IOException e )
-                        {
-                            getLog().error( "Error stopping async process stream handler for: " + commandLine, e );
+                        } catch (IOException e) {
+                            getLog().error("Error stopping async process stream handler for: " + commandLine, e);
                         }
                     }
-                } );
+                });
                 result = 0;
+            } else {
+                result = exec.execute(commandLine, enviro);
             }
-            else
-            {
-                result = exec.execute( commandLine, enviro );
-            }
-        }
-        finally
-        {
-            if ( !async )
-            {
+        } finally {
+            if (!async) {
                 psh.stop();
             }
         }
@@ -1014,82 +926,56 @@ public class ExecMojo
     // methods used for tests purposes - allow mocking and simulate automatic setters
     //
 
-    void setExecutable( String executable )
-    {
+    void setExecutable(String executable) {
         this.executable = executable;
     }
 
-    String getExecutable()
-    {
+    String getExecutable() {
         return executable;
     }
 
-    void setWorkingDirectory( String workingDir )
-    {
-        setWorkingDirectory( new File( workingDir ) );
+    void setWorkingDirectory(String workingDir) {
+        setWorkingDirectory(new File(workingDir));
     }
 
-    void setWorkingDirectory( File workingDir )
-    {
+    void setWorkingDirectory(File workingDir) {
         this.workingDirectory = workingDir;
     }
 
-    void setArguments( List<?> arguments )
-    {
+    void setArguments(List<?> arguments) {
         this.arguments = arguments;
     }
 
-    void setBasedir( File basedir )
-    {
+    void setBasedir(File basedir) {
         this.basedir = basedir;
     }
 
-    void setProject( MavenProject project )
-    {
+    void setProject(MavenProject project) {
         this.project = project;
     }
 
-    protected String getSystemProperty( String key )
-    {
-        return System.getProperty( key );
+    protected String getSystemProperty(String key) {
+        return System.getProperty(key);
     }
 
-    public void setSuccessCodes( Integer... list )
-    {
+    public void setSuccessCodes(Integer... list) {
         this.successCodes = new int[list.length];
-        for ( int index = 0; index < list.length; index++ )
-        {
+        for (int index = 0; index < list.length; index++) {
             successCodes[index] = list[index];
         }
     }
 
-    public int[] getSuccessCodes()
-    {
+    public int[] getSuccessCodes() {
         return successCodes;
     }
 
-    private Toolchain getToolchain()
-    {
-        Toolchain tc = null;
-
-        try
-        {
-            if ( session != null ) // session is null in tests..
-            {
-                ToolchainManager toolchainManager =
-                    (ToolchainManager) session.getContainer().lookup( ToolchainManager.ROLE );
-
-                if ( toolchainManager != null )
-                {
-                    tc = toolchainManager.getToolchainFromBuildContext( toolchain, session );
-                }
-            }
+    private Toolchain getToolchain() {
+        // session and toolchainManager can be null in tests ...
+        MavenSession session = getSession();
+        if (session != null && toolchainManager != null) {
+            return toolchainManager.getToolchainFromBuildContext(toolchain, session);
         }
-        catch ( ComponentLookupException componentLookupException )
-        {
-            // just ignore, could happen in pre-2.0.9 builds..
-        }
-        return tc;
+        return null;
     }
 
     /**
@@ -1100,165 +986,154 @@ public class ExecMojo
      * @return
      * @throws IOException
      */
-    private File createJar( List<String> classPath, String mainClass )
-        throws IOException
-    {
-        File file = File.createTempFile( "maven-exec", ".jar" );
+    private File createJar(List<String> classPath, String mainClass) throws IOException {
+        File file = Files.createTempFile("maven-exec", ".jar").toFile();
         file.deleteOnExit();
-        FileOutputStream fos = new FileOutputStream( file );
-        JarOutputStream jos = new JarOutputStream( fos );
-        jos.setLevel( JarOutputStream.STORED );
-        JarEntry je = new JarEntry( "META-INF/MANIFEST.MF" );
-        jos.putNextEntry( je );
+        try (FileOutputStream fos = new FileOutputStream(file);
+                JarOutputStream jos = new JarOutputStream(fos)) {
+            jos.setLevel(JarOutputStream.STORED);
+            JarEntry je = new JarEntry("META-INF/MANIFEST.MF");
+            jos.putNextEntry(je);
 
-        Manifest man = new Manifest();
+            Manifest man = new Manifest();
 
-        // we can't use StringUtils.join here since we need to add a '/' to
-        // the end of directory entries - otherwise the jvm will ignore them.
-        StringBuilder cp = new StringBuilder();
-        for ( String el : classPath )
-        {
-            // NOTE: if File points to a directory, this entry MUST end in '/'.
-            cp.append( new URL( new File( el ).toURI().toASCIIString() ).toExternalForm() + " " );
+            // we can't use StringUtils.join here since we need to add a '/' to
+            // the end of directory entries - otherwise the jvm will ignore them.
+            StringBuilder cp = new StringBuilder();
+            for (String el : classPath) {
+                // NOTE: if File points to a directory, this entry MUST end in '/'.
+                cp.append(new URL(new File(el).toURI().toASCIIString()).toExternalForm() + " ");
+            }
+
+            man.getMainAttributes().putValue("Manifest-Version", "1.0");
+            man.getMainAttributes().putValue("Class-Path", cp.toString().trim());
+            man.getMainAttributes().putValue("Main-Class", mainClass);
+
+            man.write(jos);
         }
-
-        man.getMainAttributes().putValue( "Manifest-Version", "1.0" );
-        man.getMainAttributes().putValue( "Class-Path", cp.toString().trim() );
-        man.getMainAttributes().putValue( "Main-Class", mainClass );
-
-        man.write( jos );
-        jos.close();
 
         return file;
     }
 
-    private void createArgFile( String filePath, List<String> lines )
-        throws IOException
-    {
-        final String EOL = System.getProperty( "line.separator", "\\n" );
+    private void createArgFile(String filePath, List<String> lines) throws IOException {
+        final String EOL = System.getProperty("line.separator", "\\n");
 
-        FileWriter writer = null;
-        try
-        {
-            writer = new FileWriter( filePath );
-            for ( String line : lines )
-            {
-                writer.append( line ).append( EOL );
+        try (FileWriter writer = new FileWriter(filePath)) {
+            for (String line : lines) {
+                writer.append(line).append(EOL);
             }
-
-        }
-        finally
-        {
-            IOUtil.close( writer );
         }
     }
 
-    protected Map<String, String> createEnvs( File envScriptFile )
-        throws MojoExecutionException
-    {
+    String getShebang(File script) {
+        if (script == null || !script.canRead()) {
+            getLog().warn("Cannot read script file " + script);
+            return null;
+        }
+        try (BufferedReader reader = Files.newBufferedReader(script.toPath())) {
+            String line = reader.readLine();
+            if (line != null && line.startsWith("#!")) {
+                return line.substring(2).trim();
+            }
+        } catch (IOException e) {
+            getLog().warn("Could not read shebang from " + script.getAbsolutePath(), e);
+        }
+        return null;
+    }
+
+    protected Map<String, String> createEnvs(File envScriptFile) throws MojoExecutionException {
         Map<String, String> results = null;
 
         File tmpEnvExecFile = null;
-        try
-        {
-            tmpEnvExecFile = this.createEnvWrapperFile( envScriptFile );
+        try {
+            tmpEnvExecFile = this.createEnvWrapperFile(envScriptFile);
 
-            Commandline cl = new Commandline();// commons-exec instead?
-            cl.setExecutable( tmpEnvExecFile.getAbsolutePath() );
-            if ( !OS.isFamilyWindows() )
-            {
-                cl.setExecutable( "sh" );
-                cl.createArg().setFile( tmpEnvExecFile );
+            Commandline cl = new Commandline(); // commons-exec instead?
+            cl.setExecutable(tmpEnvExecFile.getAbsolutePath());
+            if (!OS.isFamilyWindows()) {
+                String shebang = getShebang(envScriptFile);
+                if (shebang != null && !shebang.isEmpty()) {
+                    String[] parts = shebang.split("\\s+");
+                    cl.setExecutable(parts[0]);
+                    for (int i = 1; i < parts.length; i++) {
+                        cl.createArg().setValue(parts[i]);
+                    }
+                } else {
+                    cl.setExecutable("sh");
+                }
+                cl.createArg().setFile(tmpEnvExecFile);
             }
 
             // pickup the initial env vars so that the env script can used if necessary
-            if ( environmentVariables != null )
-            {
-                for ( Map.Entry<String, String> item : environmentVariables.entrySet() )
-                {
-                    cl.addEnvironment( item.getKey(), item.getValue() );
+            if (environmentVariables != null) {
+                for (Map.Entry<String, String> item : environmentVariables.entrySet()) {
+                    cl.addEnvironment(item.getKey(), item.getValue());
                 }
             }
 
             EnvStreamConsumer stdout = new EnvStreamConsumer();
             StreamConsumer stderr = new DefaultConsumer();
 
-            CommandLineUtils.executeCommandLine( cl, stdout, stderr );
+            CommandLineUtils.executeCommandLine(cl, stdout, stderr);
 
-            if(!stdout.getUnparsedLines().isEmpty())
-            {
-                getLog().warn( "The following lines could not be parsed into environment variables :" );
-                for ( String line : stdout.getUnparsedLines() )
-                {
-                    getLog().warn( line );
+            if (!stdout.getUnparsedLines().isEmpty()) {
+                getLog().warn("The following lines could not be parsed into environment variables :");
+                for (String line : stdout.getUnparsedLines()) {
+                    getLog().warn(line);
                 }
             }
 
             results = stdout.getParsedEnv();
-        }
-        catch ( CommandLineException e )
-        {
-            throw new MojoExecutionException( e.getMessage() );
-        }
-        catch ( IOException e )
-        {
-            throw new MojoExecutionException( e.getMessage() );
-        }
-        finally
-        {
-            if ( tmpEnvExecFile != null )
-            {
+        } catch (CommandLineException | IOException e) {
+            throw new MojoExecutionException(e.getMessage());
+        } finally {
+            if (tmpEnvExecFile != null) {
                 tmpEnvExecFile.delete();
             }
         }
 
         return results;
-
     }
 
-    protected File createEnvWrapperFile( File envScript )
-        throws IOException
-    {
-        PrintWriter writer = null;
+    protected File createEnvWrapperFile(File envScript) throws IOException {
         File tmpFile = null;
-        try
-        {
 
-            if ( OS.isFamilyWindows() )
-            {
-                tmpFile = File.createTempFile( "env", ".bat" );
-                writer = new PrintWriter( tmpFile );
-                writer.append( "@echo off" ).println();
-                writer.append( "call \"" ).append( envScript.getCanonicalPath() ).append( "\"" ).println();
-                writer.append( "echo " + EnvStreamConsumer.START_PARSING_INDICATOR ).println();
-                writer.append( "set" ).println();
+        if (OS.isFamilyWindows()) {
+            tmpFile = Files.createTempFile("env", ".bat").toFile();
+            try (PrintWriter writer = new PrintWriter(tmpFile)) {
+                writer.append("@echo off").println();
+                writer.append("call \"")
+                        .append(envScript.getCanonicalPath())
+                        .append("\"")
+                        .println();
+                writer.append("echo " + EnvStreamConsumer.START_PARSING_INDICATOR)
+                        .println();
+                writer.append("set").println();
                 writer.flush();
             }
-            else
-            {
-                tmpFile = File.createTempFile( "env", ".sh" );
-                // tmpFile.setExecutable( true );//java 6 only
-                writer = new PrintWriter( tmpFile );
-                writer.append( "#! /bin/sh" ).println();
-                writer.append( ". " ).append( envScript.getCanonicalPath() ).println(); // works on all unix??
-                writer.append( "echo " + EnvStreamConsumer.START_PARSING_INDICATOR ).println();
-                writer.append( "env" ).println();
+        } else {
+            tmpFile = Files.createTempFile("env", ".sh").toFile();
+            // tmpFile.setExecutable( true );//java 6 only
+            String shebang = getShebang(envScript);
+            try (PrintWriter writer = new PrintWriter(tmpFile)) {
+                if (shebang != null && !shebang.isEmpty()) {
+                    writer.append("#!").append(shebang).println();
+                } else {
+                    writer.append("#!/bin/sh").println();
+                }
+                writer.append(". ").append(envScript.getCanonicalPath()).println(); // works on all unix??
+                writer.append("echo " + EnvStreamConsumer.START_PARSING_INDICATOR)
+                        .println();
+                writer.append("env").println();
                 writer.flush();
             }
-        }
-        finally
-        {
-            IOUtil.close( writer );
         }
 
         return tmpFile;
-
     }
 
-    protected ProcessDestroyer getProcessDestroyer()
-    {
-        if ( processDestroyer == null )
-        {
+    protected ProcessDestroyer getProcessDestroyer() {
+        if (processDestroyer == null) {
             processDestroyer = new ShutdownHookProcessDestroyer();
         }
         return processDestroyer;
